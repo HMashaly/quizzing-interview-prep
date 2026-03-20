@@ -6,8 +6,22 @@ import json
 import hashlib
 from datetime import datetime
 
+# Load environment variables
 load_dotenv()
-openai.api_key = os.getenv("OPENAI_API_KEY")
+
+# ===== FIX: Use the new OpenAI client syntax =====
+from openai import OpenAI
+
+# Get API key from environment
+api_key = os.getenv("OPENAI_API_KEY")
+
+# Check if API key exists
+if not api_key:
+    st.error("❌ OPENAI_API_KEY not found in .env file! Please add your API key.")
+    st.stop()
+
+# Initialize the OpenAI client (new method for openai>=1.0.0)
+client = OpenAI(api_key=api_key)
 
 st.set_page_config(page_title="Interview Practice - Turing College", page_icon="🎓")
 
@@ -256,10 +270,9 @@ with st.sidebar:
     )
     
     st.markdown("### Topic (optional)")
-    topic = st.text_input("", placeholder="e.g., Python, System Design, Leadership")
-    
+    topic = st.text_input("Topic", placeholder="e.g., Python, System Design, Leadership", label_visibility="collapsed")    
     st.markdown("### Job description (optional)")
-    job_desc_input = st.text_area("", placeholder="Paste job description here...", height=100)
+    job_desc_input = st.text_area("Job Description", placeholder="Paste job description here...", height=100, label_visibility="collapsed")
 
     # ===== LLM SETTINGS (Multiple settings for tuning) =====
     st.markdown("---")
@@ -276,13 +289,21 @@ with st.sidebar:
     
     st.markdown("### 🤖 AI Model")
     model = st.selectbox(
-        "",
-        ["GPT-4o mini", "GPT-4o", "GPT-3.5 Turbo"],
-        key="model_select"
+    "AI Model",
+    ["GPT-4o mini", "GPT-4o", "GPT-3.5 Turbo"],
+    key="model_select",
+    label_visibility="collapsed"
     )
     
-    # ===== SECURITY GUARD: Input validation indicator =====
+    # Show API key status
     st.markdown("---")
+    st.markdown("### 🔑 API Status")
+    if api_key:
+        st.success("✅ API Key loaded")
+    else:
+        st.error("❌ API Key missing!")
+    
+    # ===== SECURITY GUARD: Input validation indicator =====
     st.markdown("### 🔒 Security")
     st.markdown("""
     <div class="security-badge">
@@ -299,9 +320,12 @@ with st.sidebar:
     
     # Start interview button
     if st.button("🚀 Start interview", type="primary", use_container_width=True):
-        st.session_state.interview_started = True
-        st.session_state.messages = []
-        st.rerun()
+        if not api_key:
+            st.error("❌ Cannot start interview: API key missing!")
+        else:
+            st.session_state.interview_started = True
+            st.session_state.messages = []
+            st.rerun()
 
 # Main chat area
 st.title("💬 Interview Practice with AI")
@@ -370,28 +394,32 @@ Let's begin with your first question:"""
                     {f'Topic: {topic}' if topic else ''}
                     {'Provide the response in valid JSON format with fields: question (the interview question).' if structured_output else 'Just ask the question naturally.'}"""
                     
-                    # API call with all tuned settings
-                    response = openai.chat.completions.create(
-                        model="gpt-4o-mini" if "mini" in model else "gpt-4" if "GPT-4o" in model else "gpt-3.5-turbo",
-                        messages=[
-                            {"role": "system", "content": validated_prompt},
-                            {"role": "user", "content": first_question_prompt}
-                        ],
-                        temperature=temperature,
-                        top_p=top_p,
-                        frequency_penalty=frequency_penalty
-                    )
-                    
-                    # Track usage
-                    input_tokens = response.usage.prompt_tokens
-                    output_tokens = response.usage.completion_tokens
-                    call_cost = calculate_cost(model, input_tokens, output_tokens)
-                    st.session_state.total_tokens += input_tokens + output_tokens
-                    st.session_state.total_cost += call_cost
-                    
-                    first_question = response.choices[0].message.content
-                    st.markdown(first_question)
-                    st.session_state.messages.append({"role": "assistant", "content": first_question})
+                    # ===== FIX: Use client instead of openai.chat =====
+                    try:
+                        response = client.chat.completions.create(
+                            model="gpt-4o-mini" if "mini" in model else "gpt-4" if "GPT-4o" in model else "gpt-3.5-turbo",
+                            messages=[
+                                {"role": "system", "content": validated_prompt},
+                                {"role": "user", "content": first_question_prompt}
+                            ],
+                            temperature=temperature,
+                            top_p=top_p,
+                            frequency_penalty=frequency_penalty
+                        )
+                        
+                        # Track usage
+                        input_tokens = response.usage.prompt_tokens
+                        output_tokens = response.usage.completion_tokens
+                        call_cost = calculate_cost(model, input_tokens, output_tokens)
+                        st.session_state.total_tokens += input_tokens + output_tokens
+                        st.session_state.total_cost += call_cost
+                        
+                        first_question = response.choices[0].message.content
+                        st.markdown(first_question)
+                        st.session_state.messages.append({"role": "assistant", "content": first_question})
+                    except Exception as e:
+                        st.error(f"Error generating question: {str(e)}")
+                        st.stop()
     
     # Fixed chat input at bottom
     if prompt := st.chat_input("Type your answer here..."):
@@ -448,38 +476,41 @@ Return your response as a valid JSON object with:
 Provide feedback on the answer and ask the next question naturally.
 Make it {difficulty.lower()} difficulty."""
                 
-                # API call with all tuned settings
-                response = openai.chat.completions.create(
-                    model="gpt-4o-mini" if "mini" in model else "gpt-4" if "GPT-4o" in model else "gpt-3.5-turbo",
-                    messages=[
-                        {"role": "system", "content": validated_prompt},
-                        {"role": "user", "content": assistant_prompt}
-                    ],
-                    temperature=temperature,
-                    top_p=top_p,
-                    frequency_penalty=frequency_penalty
-                )
-                
-                # Track usage
-                input_tokens = response.usage.prompt_tokens
-                output_tokens = response.usage.completion_tokens
-                call_cost = calculate_cost(model, input_tokens, output_tokens)
-                st.session_state.total_tokens += input_tokens + output_tokens
-                st.session_state.total_cost += call_cost
-                
-                assistant_response = response.choices[0].message.content
-                
-                # Display response based on format
-                if st.session_state.structured_output:
-                    try:
-                        data = json.loads(assistant_response)
-                        st.json(data)
-                    except:
+                # ===== FIX: Use client instead of openai.chat =====
+                try:
+                    response = client.chat.completions.create(
+                        model="gpt-4o-mini" if "mini" in model else "gpt-4" if "GPT-4o" in model else "gpt-3.5-turbo",
+                        messages=[
+                            {"role": "system", "content": validated_prompt},
+                            {"role": "user", "content": assistant_prompt}
+                        ],
+                        temperature=temperature,
+                        top_p=top_p,
+                        frequency_penalty=frequency_penalty
+                    )
+                    
+                    # Track usage
+                    input_tokens = response.usage.prompt_tokens
+                    output_tokens = response.usage.completion_tokens
+                    call_cost = calculate_cost(model, input_tokens, output_tokens)
+                    st.session_state.total_tokens += input_tokens + output_tokens
+                    st.session_state.total_cost += call_cost
+                    
+                    assistant_response = response.choices[0].message.content
+                    
+                    # Display response based on format
+                    if st.session_state.structured_output:
+                        try:
+                            data = json.loads(assistant_response)
+                            st.json(data)
+                        except:
+                            st.markdown(assistant_response)
+                    else:
                         st.markdown(assistant_response)
-                else:
-                    st.markdown(assistant_response)
-                
-                st.session_state.messages.append({"role": "assistant", "content": assistant_response})
+                    
+                    st.session_state.messages.append({"role": "assistant", "content": assistant_response})
+                except Exception as e:
+                    st.error(f"Error generating response: {str(e)}")
         
         st.rerun()
 

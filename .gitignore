@@ -1,5 +1,12 @@
 __pycache__/
 *.pyc
 .viz-env/
-.env
 .DS_Store
+
+# Ignore actual .env file but NOT .env.example
+.env
+.env.local
+.env.*.local
+
+# Keep .env.example for the template
+!.env.example
