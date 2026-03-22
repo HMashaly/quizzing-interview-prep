@@ -42,11 +42,21 @@ Open your terminal and run:
 
 ```bash
 # Install all required packages
-pip install streamlit openai python-dotenv pandas plotly
+pip install -r requirements.txt
 # Verify the installation
 pip list | grep streamlit
 pip list | grep openai
 ```
+
+### Deploy on Streamlit Community Cloud
+
+If install fails on the cloud with **Pillow / zlib** or **pandas** build errors, the environment is usually **Python 3.13+** (e.g. 3.14) while old pinned packages have **no pre-built wheels** and try to compile from source.
+
+1. In [share.streamlit.io](https://share.streamlit.io/), open your app → **Manage app** → **Settings**.
+2. Under **Advanced settings**, set **Python version** to **3.12** (recommended). Redeploy if you change it.
+3. This repo’s `requirements.txt` only lists what `app.py` uses (`streamlit`, `openai`), so installs stay fast and reliable.
+
+The **SetuptoolsDeprecationWarning** about license classifiers is a harmless upstream warning during dependency installs.
 
 ### Step 2: Create Your OpenAI API Key File
 

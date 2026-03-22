@@ -1,5 +1,5 @@
-streamlit==1.28.1
-openai==1.6.1
-python-dotenv==1.0.0
-pandas==2.1.4
-plotly==5.18.0
+# Minimal deps for app.py (Streamlit + OpenAI only).
+# Use Python 3.12 on Streamlit Community Cloud (Advanced settings) — avoid 3.14
+# with old pins; pandas/plotly were removed (not used in this app).
+streamlit>=1.40.0,<2
+openai>=1.50.0
