@@ -3,6 +3,8 @@
 
 An AI-powered interview preparation application built with Streamlit and OpenAI. Practice for job interviews with an intelligent AI interviewer that adapts to your needs.
 
+**Live app:** [Streamlit Cloud deployment](https://obpaxhzrp7wgw52b4orob8.streamlit.app)
+
 ## 📋 Project Overview
 
 This application was developed as part of the Turing College AI Engineering Sprint 1 project, demonstrating:
