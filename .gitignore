@@ -10,3 +10,5 @@ __pycache__/
 
 # Keep .env.example for the template
 !.env.example
+
+*.log

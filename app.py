@@ -1,228 +1,102 @@
 import streamlit as st
-import openai
-from dotenv import load_dotenv
 import os
-import json
-import hashlib
-from datetime import datetime
-
-# Load environment variables
-load_dotenv()
-
-# ===== FIX: Use the new OpenAI client syntax =====
 from openai import OpenAI
 
-# Get API key from environment
-api_key = os.getenv("OPENAI_API_KEY")
+# Initialize session state variables
+if 'prompt_technique' not in st.session_state:
+    st.session_state.prompt_technique = "Zero-shot"
+if 'interview_started' not in st.session_state:
+    st.session_state.interview_started = False
+if 'total_cost' not in st.session_state:
+    st.session_state.total_cost = 0
+if 'total_tokens' not in st.session_state:
+    st.session_state.total_tokens = 0
+if 'messages' not in st.session_state:
+    st.session_state.messages = []
+if 'user_api_key' not in st.session_state:
+    st.session_state.user_api_key = os.getenv("OPENAI_API_KEY", "")
+if 'api_key_valid' not in st.session_state:
+    st.session_state.api_key_valid = False
+if 'client' not in st.session_state:
+    st.session_state.client = None
+if 'structured_output' not in st.session_state:
+    st.session_state.structured_output = False
 
-# Check if API key exists
-if not api_key:
-    st.error("❌ OPENAI_API_KEY not found in .env file! Please add your API key.")
-    st.stop()
-
-# Initialize the OpenAI client (new method for openai>=1.0.0)
-client = OpenAI(api_key=api_key)
-
-st.set_page_config(page_title="Interview Practice - Turing College", page_icon="🎓")
-
-# ===== SECURITY GUARD: Input validation and sanitization =====
-def validate_input(text):
-    """Security guard: Validate and sanitize user input"""
-    if not text or len(text.strip()) == 0:
-        return False, "Input cannot be empty"
-    if len(text) > 5000:
-        return False, "Input too long (max 5000 characters)"
-    
-    # Block common jailbreak attempts
-    blocked_patterns = [
-        "ignore previous instructions",
-        "forget your role",
-        "you are now",
-        "system prompt",
-        "jailbreak"
-    ]
-    
-    text_lower = text.lower()
-    for pattern in blocked_patterns:
-        if pattern in text_lower:
-            return False, f"Input contains blocked content: '{pattern}'"
-    
-    return True, text[:5000]  # Truncate if needed
-
-# ===== PROMPT ENGINEERING TECHNIQUES (5 different system prompts) =====
+# Define PROMPT_TECHNIQUES
 PROMPT_TECHNIQUES = {
-    "Zero-Shot": {
-        "description": "Direct questioning without examples",
-        "system_prompt": "You are a professional interviewer. Ask interview questions directly."
+    "Zero-shot": {
+        "description": "Direct questioning without examples. Best for straightforward interviews.",
+        "system_prompt": """You are an expert technical interviewer conducting a professional interview.
+        Ask clear, direct questions and evaluate responses based on technical accuracy and communication.
+        Provide constructive feedback after each response."""
     },
-    "Few-Shot": {
-        "description": "Provides examples of good answers",
-        "system_prompt": """You are a professional interviewer. Here are examples of good interview responses:
-        
-Example 1: "I led a team of 5 developers to deliver a project 2 weeks ahead of schedule by implementing agile methodologies."
-Example 2: "When faced with a critical bug, I systematically debugged by isolating components and using unit tests."
-
-Use these as reference for evaluating answers."""
+    "Few-shot": {
+        "description": "Provides examples of good responses to guide the candidate.",
+        "system_prompt": """You are an expert interviewer providing examples of high-quality responses.
+        When asking questions, show 1-2 examples of what a great answer would look like.
+        Help the candidate understand expectations while still challenging them to think independently."""
     },
     "Chain-of-Thought": {
-        "description": "Shows reasoning process in responses",
-        "system_prompt": """You are a professional interviewer who thinks step-by-step.
-        
-When evaluating answers:
-1. First, identify the key points in the candidate's response
-2. Then, assess technical accuracy
-3. Next, evaluate communication clarity
-4. Finally, provide structured feedback
-Show your reasoning process in your responses."""
+        "description": "Encourages step-by-step reasoning for complex problems.",
+        "system_prompt": """You are an interviewer focused on understanding problem-solving approaches.
+        Encourage candidates to explain their reasoning step-by-step.
+        Ask follow-up questions about their thought process and decision-making."""
     },
-    "Role-Play (Strict)": {
-        "description": "Acts as a strict, demanding interviewer",
-        "system_prompt": """You are a strict, demanding interviewer from a top tech company.
-        
-Rules:
-- Ask challenging, technical questions
-- Push back on vague answers
-- Require specific examples and details
-- Keep responses professional but firm
-- Don't give compliments easily"""
+    "Self-Consistency": {
+        "description": "Asks candidates to verify and improve their own answers.",
+        "system_prompt": """You are an interviewer who encourages self-reflection and verification.
+        After candidates answer, ask them to review their response for completeness or potential improvements.
+        Encourage them to consider alternative approaches or edge cases."""
     },
-    "Role-Play (Friendly)": {
-        "description": "Acts as a supportive, encouraging interviewer",
-        "system_prompt": """You are a friendly, supportive interviewer who helps candidates succeed.
-        
-Rules:
-- Start with positive reinforcement
-- Provide constructive feedback gently
-- Encourage elaboration with kind prompts
-- Celebrate good answers enthusiastically
-- Create a comfortable interview environment"""
-    },
-    "Structured Output": {
-        "description": "Provides feedback in JSON format",
-        "system_prompt": """You are a professional interviewer. Provide feedback in JSON format with:
-- score: number from 1-10
-- strengths: array of strengths
-- improvements: array of areas to improve
-- next_question: the next interview question
-- evaluation: detailed evaluation text"""
+    "Role-based": {
+        "description": "Assigns specific roles (e.g., Senior Engineer, Product Manager) for context.",
+        "system_prompt": """You are conducting a role-specific interview.
+        Frame questions and evaluate responses based on the target role's responsibilities.
+        Provide context about why certain skills are important for the role."""
     }
 }
 
-# Custom CSS for better UI
+# Page config
+st.set_page_config(
+    page_title="AI Interview Practice",
+    page_icon="🎓",
+    layout="wide"
+)
+
+# Custom CSS
 st.markdown("""
 <style>
-    /* Turing College branding colors */
-    :root {
-        --tc-primary: #0066CC;
-        --tc-secondary: #00A3FF;
-        --tc-accent: #FF6B00;
-    }
-    
-    .main > div {
-        padding-bottom: 100px;
-        height: 100vh;
-        display: flex;
-        flex-direction: column;
-    }
-    
-    .stChatMessageContainer {
-        flex-grow: 1;
-        overflow-y: auto;
-        margin-bottom: 20px;
-    }
-    
-    .stChatInput {
-        position: fixed;
-        bottom: 0;
-        left: 0;
-        right: 0;
-        background: white;
-        padding: 20px;
-        z-index: 100;
-        border-top: 1px solid #eee;
-    }
-    
-    @media (min-width: 768px) {
-        .stChatInput {
-            left: 21rem;
-        }
-    }
-    
-    /* Turing College branding */
-    .tc-header {
-        background: linear-gradient(135deg, var(--tc-primary), var(--tc-secondary));
-        padding: 1rem;
-        border-radius: 10px;
-        color: white;
-        margin-bottom: 1rem;
-    }
-    
-    .security-badge {
-        background-color: #f0f9ff;
-        border-left: 4px solid var(--tc-accent);
-        padding: 0.5rem;
-        margin: 0.5rem 0;
-        font-size: 0.8rem;
-    }
+.tc-header {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    padding: 1rem;
+    border-radius: 10px;
+    margin-bottom: 1rem;
+    text-align: center;
+}
+.tc-header h2 {
+    color: white;
+    margin: 0;
+}
+.tc-header p {
+    color: rgba(255,255,255,0.9);
+    margin: 0.5rem 0 0 0;
+}
+.security-badge {
+    background-color: #f0f2f6;
+    padding: 0.5rem;
+    border-radius: 5px;
+    font-size: 0.8rem;
+    font-family: monospace;
+}
+.stButton button {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    font-weight: bold;
+}
 </style>
 """, unsafe_allow_html=True)
 
-# Initialize session state
-if 'messages' not in st.session_state:
-    st.session_state.messages = []
-if 'interview_started' not in st.session_state:
-    st.session_state.interview_started = False
-if 'job_context' not in st.session_state:
-    st.session_state.job_context = "Python Developer"
-if 'difficulty' not in st.session_state:
-    st.session_state.difficulty = "Medium"
-if 'interview_type' not in st.session_state:
-    st.session_state.interview_type = "Mixed"
-if 'prompt_technique' not in st.session_state:
-    st.session_state.prompt_technique = "Zero-Shot"
-if 'structured_output' not in st.session_state:
-    st.session_state.structured_output = False
-if 'total_tokens' not in st.session_state:
-    st.session_state.total_tokens = 0
-if 'total_cost' not in st.session_state:
-    st.session_state.total_cost = 0.0
-
-# ===== COST CALCULATION FUNCTION =====
-def calculate_cost(model_name, input_tokens, output_tokens):
-    """Calculate API call cost"""
-    pricing = {
-        "GPT-4o mini": {"input": 0.00015, "output": 0.0006},  # per 1K tokens
-        "GPT-4o": {"input": 0.0025, "output": 0.01},
-        "GPT-3.5 Turbo": {"input": 0.0005, "output": 0.0015}
-    }
-    
-    model_key = next((m for m in pricing.keys() if m in model_name), "GPT-4o mini")
-    prices = pricing[model_key]
-    
-    input_cost = (input_tokens / 1000) * prices["input"]
-    output_cost = (output_tokens / 1000) * prices["output"]
-    
-    return input_cost + output_cost
-
-# ===== SECURITY GUARD: System prompt validation =====
-def validate_system_prompt(prompt):
-    """Security guard: Ensure system prompt doesn't contain harmful instructions"""
-    harmful_patterns = [
-        "ignore safety",
-        "bypass restrictions",
-        "harmful",
-        "illegal",
-        "unethical"
-    ]
-    
-    prompt_lower = prompt.lower()
-    for pattern in harmful_patterns:
-        if pattern in prompt_lower:
-            return False, f"System prompt contains blocked content: '{pattern}'"
-    
-    return True, prompt
-
-# SIDEBAR
+# SIDEBAR - CORRECT VERSION
 with st.sidebar:
     # Turing College branding
     st.markdown("""
@@ -234,7 +108,62 @@ with st.sidebar:
     
     st.title("🎯 Interview Settings")
     
-    # ===== PROMPT TECHNIQUE SELECTION (Requirement: 5 different techniques) =====
+    # ===== API KEY INPUT =====
+    st.markdown("### 🔑 OpenAI API Key")
+    
+    # Add helpful link to get API key
+    st.markdown("""
+    <div style="font-size: 0.8rem; margin-top: -10px; margin-bottom: 10px;">
+        <a href="https://platform.openai.com/api-keys" target="_blank">🔑 Get your API key here</a>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # API key input (masked)
+    api_key_input = st.text_input(
+        "OpenAI API Key",
+        value=st.session_state.user_api_key,
+        type="password",
+        placeholder="sk-... or sk-proj-...",
+        help="Enter your OpenAI API key. Get one from the link above",
+        key="api_key_input_widget"
+    )
+    
+    # Update client when key changes
+    if api_key_input != st.session_state.user_api_key:
+        st.session_state.user_api_key = api_key_input
+        if api_key_input and api_key_input.startswith(('sk-', 'sk-proj-')):
+            try:
+                client = OpenAI(api_key=api_key_input)
+                st.session_state.client = client
+                st.session_state.api_key_valid = True
+            except Exception as e:
+                st.session_state.api_key_valid = False
+                st.error(f"Invalid API key: {str(e)}")
+    
+    # Show API key status
+    if st.session_state.user_api_key:
+        if st.session_state.user_api_key.startswith(('sk-', 'sk-proj-')):
+            st.success("✅ API Key ready")
+            api_key = st.session_state.user_api_key
+            client = st.session_state.get('client', None)
+            if not client:
+                try:
+                    client = OpenAI(api_key=api_key)
+                    st.session_state.client = client
+                except:
+                    client = None
+        else:
+            st.error("❌ Invalid format. Key should start with 'sk-' or 'sk-proj-'")
+            api_key = None
+            client = None
+    else:
+        st.warning("⚠️ Enter your API key to begin")
+        api_key = None
+        client = None
+    
+    st.markdown("---")
+    
+    # ===== PROMPT TECHNIQUE SELECTION =====
     st.markdown("### 🧠 Prompt Engineering Technique")
     selected_technique = st.selectbox(
         "Choose prompting technique:",
@@ -245,7 +174,8 @@ with st.sidebar:
     if selected_technique != st.session_state.prompt_technique:
         st.session_state.prompt_technique = selected_technique
         if st.session_state.interview_started:
-            st.session_state.messages = []  # Reset chat when technique changes
+            st.session_state.messages = []
+            st.rerun()
     
     st.info(f"**{selected_technique}:** {PROMPT_TECHNIQUES[selected_technique]['description']}")
     
@@ -274,7 +204,7 @@ with st.sidebar:
     st.markdown("### Job description (optional)")
     job_desc_input = st.text_area("Job Description", placeholder="Paste job description here...", height=100, label_visibility="collapsed")
 
-    # ===== LLM SETTINGS (Multiple settings for tuning) =====
+    # ===== LLM SETTINGS =====
     st.markdown("---")
     st.markdown("### ⚙️ LLM Settings")
     
@@ -288,22 +218,21 @@ with st.sidebar:
                                   help="Reduce repetition of tokens")
     
     st.markdown("### 🤖 AI Model")
-    model = st.selectbox(
-    "AI Model",
-    ["GPT-4o mini", "GPT-4o", "GPT-3.5 Turbo"],
-    key="model_select",
-    label_visibility="collapsed"
+    model_map = {
+        "GPT-4o mini": "gpt-4o-mini",
+        "GPT-4o": "gpt-4o",
+        "GPT-3.5 Turbo": "gpt-3.5-turbo"
+    }
+    selected_model = st.selectbox(
+        "AI Model",
+        list(model_map.keys()),
+        key="model_select",
+        label_visibility="collapsed"
     )
-    
-    # Show API key status
-    st.markdown("---")
-    st.markdown("### 🔑 API Status")
-    if api_key:
-        st.success("✅ API Key loaded")
-    else:
-        st.error("❌ API Key missing!")
+    model = model_map[selected_model]
     
     # ===== SECURITY GUARD: Input validation indicator =====
+    st.markdown("---")
     st.markdown("### 🔒 Security")
     st.markdown("""
     <div class="security-badge">
@@ -319,200 +248,113 @@ with st.sidebar:
         st.metric("🔢 Total Tokens", st.session_state.total_tokens)
     
     # Start interview button
-    if st.button("🚀 Start interview", type="primary", use_container_width=True):
-        if not api_key:
-            st.error("❌ Cannot start interview: API key missing!")
+    start_button = st.button("🚀 Start interview", type="primary", use_container_width=True)
+    
+    if start_button:
+        if not st.session_state.user_api_key:
+            st.error("❌ Please enter your OpenAI API key first!")
+        elif not st.session_state.api_key_valid:
+            st.error("❌ Invalid API key! Please check your key.")
         else:
             st.session_state.interview_started = True
             st.session_state.messages = []
+            
+            # Create initial system message
+            system_prompt = PROMPT_TECHNIQUES[selected_technique]['system_prompt']
+            
+            # Add interview context
+            context = f"\n\nInterview Context:\n- Type: {interview_type}\n- Difficulty: {difficulty}"
+            if topic:
+                context += f"\n- Topic: {topic}"
+            if job_desc_input:
+                context += f"\n- Job Description: {job_desc_input[:500]}"
+            
+            system_prompt += context
+            
+            st.session_state.messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "assistant", "content": f"Hello! I'll be conducting your {interview_type.lower()} interview at {difficulty.lower()} difficulty. Let's begin! What would you like to start with? Or I can ask you the first question."}
+            ]
             st.rerun()
 
-# Main chat area
-st.title("💬 Interview Practice with AI")
-
-# Turing College course info
-st.caption("🎓 Turing College | AI Engineering | Sprint 1 Project")
-
-# Show settings summary when interview not started
-if not st.session_state.interview_started:
-    st.markdown("Configure your interview settings in the sidebar and click **Start interview** to begin.")
-    
-    # Show preview of settings
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Type", st.session_state.interview_type)
-    with col2:
-        st.metric("Difficulty", st.session_state.difficulty)
-    with col3:
-        st.metric("Model", model)
-    with col4:
-        st.metric("Technique", selected_technique)
-
-# Interview in progress
+# Main content area
 if st.session_state.interview_started:
-    # Create a container for chat messages
-    chat_container = st.container()
+    st.title("🎤 Interview Session")
     
-    with chat_container:
-        # Display all messages
-        for message in st.session_state.messages:
+    # Display chat messages
+    for message in st.session_state.messages:
+        if message["role"] != "system":
             with st.chat_message(message["role"]):
-                # Handle structured output display
-                if message["role"] == "assistant" and st.session_state.structured_output:
-                    try:
-                        data = json.loads(message["content"])
-                        st.json(data)
-                    except:
-                        st.markdown(message["content"])
-                else:
-                    st.markdown(message["content"])
-        
-        # If no messages yet, show welcome and first question
-        if len(st.session_state.messages) == 0:
-            with st.chat_message("assistant"):
-                welcome_msg = f"""👋 Hello! I'm your AI interviewer.
-
-I'm using **{selected_technique}** prompting technique.
-I'll be asking you **{difficulty}** questions for a **{interview_type}** interview.
-
-Let's begin with your first question:"""
-                st.markdown(welcome_msg)
-                
-                # Get system prompt from selected technique
-                technique = PROMPT_TECHNIQUES[selected_technique]
-                system_prompt = technique["system_prompt"]
-                
-                # ===== SECURITY GUARD: Validate system prompt =====
-                is_valid, validated_prompt = validate_system_prompt(system_prompt)
-                if not is_valid:
-                    st.error(f"Security validation failed: {validated_prompt}")
-                    st.stop()
-                
-                # Generate first question
-                with st.spinner("Preparing question..."):
-                    first_question_prompt = f"""Ask the first {difficulty.lower()} difficulty {interview_type.lower()} interview question.
-                    {f'Topic: {topic}' if topic else ''}
-                    {'Provide the response in valid JSON format with fields: question (the interview question).' if structured_output else 'Just ask the question naturally.'}"""
-                    
-                    # ===== FIX: Use client instead of openai.chat =====
-                    try:
-                        response = client.chat.completions.create(
-                            model="gpt-4o-mini" if "mini" in model else "gpt-4" if "GPT-4o" in model else "gpt-3.5-turbo",
-                            messages=[
-                                {"role": "system", "content": validated_prompt},
-                                {"role": "user", "content": first_question_prompt}
-                            ],
-                            temperature=temperature,
-                            top_p=top_p,
-                            frequency_penalty=frequency_penalty
-                        )
-                        
-                        # Track usage
-                        input_tokens = response.usage.prompt_tokens
-                        output_tokens = response.usage.completion_tokens
-                        call_cost = calculate_cost(model, input_tokens, output_tokens)
-                        st.session_state.total_tokens += input_tokens + output_tokens
-                        st.session_state.total_cost += call_cost
-                        
-                        first_question = response.choices[0].message.content
-                        st.markdown(first_question)
-                        st.session_state.messages.append({"role": "assistant", "content": first_question})
-                    except Exception as e:
-                        st.error(f"Error generating question: {str(e)}")
-                        st.stop()
+                st.markdown(message["content"])
     
-    # Fixed chat input at bottom
-    if prompt := st.chat_input("Type your answer here..."):
-        # ===== SECURITY GUARD: Validate user input =====
-        is_valid, validated_input = validate_input(prompt)
-        if not is_valid:
-            st.error(f"❌ Security check failed: {validated_input}")
-            st.stop()
-        
+    # Chat input
+    if prompt := st.chat_input("Your answer..."):
         # Add user message
-        st.session_state.messages.append({"role": "user", "content": validated_input})
-        
-        # Display user message
+        st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
-            st.markdown(validated_input)
+            st.markdown(prompt)
         
-        # Generate assistant response
-        with st.chat_message("assistant"):
-            with st.spinner("Thinking..."):
-                # Build context
-                context = "\n".join([
-                    f"{m['role']}: {m['content']}" 
-                    for m in st.session_state.messages[-6:]
-                ])
+        # Generate AI response
+        if st.session_state.client:
+            try:
+                # Prepare messages for API
+                messages_for_api = [
+                    {"role": m["role"], "content": m["content"]}
+                    for m in st.session_state.messages
+                ]
                 
-                # Get system prompt
-                technique = PROMPT_TECHNIQUES[st.session_state.prompt_technique]
-                system_prompt = technique["system_prompt"]
+                # Call OpenAI API
+                response = st.session_state.client.chat.completions.create(
+                    model=model,
+                    messages=messages_for_api,
+                    temperature=temperature,
+                    top_p=top_p,
+                    frequency_penalty=frequency_penalty,
+                    max_tokens=1000
+                )
                 
-                # Validate system prompt
-                is_valid, validated_prompt = validate_system_prompt(system_prompt)
-                if not is_valid:
-                    st.error(f"Security validation failed: {validated_prompt}")
-                    st.stop()
+                ai_response = response.choices[0].message.content
                 
-                # Create prompt based on selected technique and output format
-                if st.session_state.structured_output:
-                    assistant_prompt = f"""The interview context:
-{context}
-
-Provide feedback on the answer and ask the next question.
-Return your response as a valid JSON object with:
-{{
-    "score": integer 1-10,
-    "strengths": [list of strengths],
-    "improvements": [list of areas to improve],
-    "next_question": "your next question",
-    "evaluation": "detailed evaluation"
-}}"""
-                else:
-                    assistant_prompt = f"""The interview context:
-{context}
-
-Provide feedback on the answer and ask the next question naturally.
-Make it {difficulty.lower()} difficulty."""
+                # Track tokens and cost
+                tokens_used = response.usage.total_tokens
+                cost = (tokens_used / 1000000) * 2.5  # Approximate cost for GPT-4o mini
+                st.session_state.total_tokens += tokens_used
+                st.session_state.total_cost += cost
                 
-                # ===== FIX: Use client instead of openai.chat =====
-                try:
-                    response = client.chat.completions.create(
-                        model="gpt-4o-mini" if "mini" in model else "gpt-4" if "GPT-4o" in model else "gpt-3.5-turbo",
-                        messages=[
-                            {"role": "system", "content": validated_prompt},
-                            {"role": "user", "content": assistant_prompt}
-                        ],
-                        temperature=temperature,
-                        top_p=top_p,
-                        frequency_penalty=frequency_penalty
-                    )
-                    
-                    # Track usage
-                    input_tokens = response.usage.prompt_tokens
-                    output_tokens = response.usage.completion_tokens
-                    call_cost = calculate_cost(model, input_tokens, output_tokens)
-                    st.session_state.total_tokens += input_tokens + output_tokens
-                    st.session_state.total_cost += call_cost
-                    
-                    assistant_response = response.choices[0].message.content
-                    
-                    # Display response based on format
-                    if st.session_state.structured_output:
-                        try:
-                            data = json.loads(assistant_response)
-                            st.json(data)
-                        except:
-                            st.markdown(assistant_response)
-                    else:
-                        st.markdown(assistant_response)
-                    
-                    st.session_state.messages.append({"role": "assistant", "content": assistant_response})
-                except Exception as e:
-                    st.error(f"Error generating response: {str(e)}")
-        
+                # Add AI response
+                st.session_state.messages.append({"role": "assistant", "content": ai_response})
+                with st.chat_message("assistant"):
+                    st.markdown(ai_response)
+                
+            except Exception as e:
+                st.error(f"Error: {str(e)}")
+        else:
+            st.error("OpenAI client not initialized. Please check your API key.")
+    
+    # End interview button
+    if st.button("End Interview"):
+        st.session_state.interview_started = False
         st.rerun()
-
-# Bottom padding
-st.markdown("<div style='height: 100px'></div>", unsafe_allow_html=True)
+        
+else:
+    # Welcome screen
+    st.title("🎓 Turing College Interview Practice")
+    st.markdown("""
+    ### Welcome to your AI-powered interview preparation tool!
+    
+    **Features:**
+    - 🎯 Multiple prompting techniques (Zero-shot, Few-shot, Chain-of-Thought, etc.)
+    - 📊 Structured JSON output option
+    - 🎭 Different interview types (Technical, Behavioral, Mixed)
+    - 📈 Adjustable difficulty levels
+    - 💰 Real-time cost tracking
+    - 🔒 Security features (input validation, jailbreak detection)
+    
+    **To get started:**
+    1. Enter your OpenAI API key in the sidebar
+    2. Configure your interview settings
+    3. Click "Start interview"
+    4. Practice answering questions and get feedback!
+    
+    **Pro tip:** Try different prompting techniques to see how they affect the interview experience!
+    """)
