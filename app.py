@@ -1,6 +1,116 @@
 import streamlit as st
 import os
+import json
 from openai import OpenAI
+
+# ----- Security guards (Turing brief: at least one; we apply input + system validation) -----
+_BLOCKED_USER_PATTERNS = [
+    "ignore previous instructions",
+    "forget your role",
+    "you are now",
+    "disregard the above",
+    "system prompt",
+    "jailbreak",
+    "ignore all prior",
+]
+
+_HARMFUL_SYSTEM_PATTERNS = [
+    "ignore safety",
+    "bypass restrictions",
+    "harmful",
+    "illegal",
+    "unethical",
+]
+
+
+def validate_input(text: str) -> tuple[bool, str]:
+    """Validate required user chat input: non-empty, length cap, jailbreak-style phrases."""
+    if text is None or not str(text).strip():
+        return False, "Message cannot be empty"
+    s = str(text).strip()
+    if len(s) > 5000:
+        return False, "Message too long (max 5000 characters)"
+    low = s.lower()
+    for pattern in _BLOCKED_USER_PATTERNS:
+        if pattern in low:
+            return False, f"Message contains blocked content: '{pattern}'"
+    return True, s
+
+
+def validate_optional_context(text: str, max_chars: int, label: str) -> tuple[bool, str]:
+    """Same checks as chat input but allow empty (topic / job description)."""
+    if text is None or not str(text).strip():
+        return True, ""
+    s = str(text).strip()
+    if len(s) > max_chars:
+        return False, f"{label} too long (max {max_chars} characters)"
+    low = s.lower()
+    for pattern in _BLOCKED_USER_PATTERNS:
+        if pattern in low:
+            return False, f"{label} contains blocked content: '{pattern}'"
+    return True, s
+
+
+def validate_system_prompt(prompt: str) -> tuple[bool, str]:
+    """Ensure system prompt (template) does not contain disallowed instruction patterns."""
+    if not prompt or not str(prompt).strip():
+        return False, "System prompt is empty"
+    low = prompt.lower()
+    for pattern in _HARMFUL_SYSTEM_PATTERNS:
+        if pattern in low:
+            return False, f"System prompt contains blocked content: '{pattern}'"
+    return True, prompt
+
+
+# OpenAI model IDs aligned with Turing Sprint 1 brief
+MODEL_MAP = {
+    "GPT-4.1": "gpt-4.1",
+    "GPT-4.1 mini": "gpt-4.1-mini",
+    "GPT-4.1 nano": "gpt-4.1-nano",
+    "GPT-4o": "gpt-4o",
+    "GPT-4o mini": "gpt-4o-mini",
+}
+
+# Rough USD per 1M input+output tokens (approximate; for display only)
+_MODEL_COST_PER_1M_TOKENS = {
+    "gpt-4.1": 3.0,
+    "gpt-4.1-mini": 0.6,
+    "gpt-4.1-nano": 0.15,
+    "gpt-4o": 5.0,
+    "gpt-4o-mini": 0.3,
+}
+
+
+def _estimate_cost_usd(model_id: str, total_tokens: int) -> float:
+    rate = _MODEL_COST_PER_1M_TOKENS.get(model_id, 1.0)
+    return (total_tokens / 1_000_000) * rate
+
+
+def _append_json_mode_instruction(system_content: str) -> str:
+    return (
+        system_content
+        + "\n\nJSON output mode: every assistant reply must be a single valid JSON object only, "
+        "with keys: \"message\" (string, what you say to the candidate) and "
+        "\"evaluation\" (object with optional \"score\" 1-10 and \"feedback\" string). "
+        "No markdown or text outside the JSON object."
+    )
+
+
+def _render_assistant_content(raw: str, structured: bool) -> None:
+    if not structured:
+        st.markdown(raw)
+        return
+    try:
+        data = json.loads(raw)
+        msg = data.get("message", raw)
+        st.markdown(msg if isinstance(msg, str) else str(msg))
+        ev = data.get("evaluation")
+        if ev is not None:
+            with st.expander("Structured evaluation"):
+                st.json(ev if isinstance(ev, (dict, list)) else {"value": ev})
+    except (json.JSONDecodeError, TypeError):
+        st.warning("Could not parse JSON; showing raw response.")
+        st.markdown(raw)
 
 # Initialize session state variables
 if 'prompt_technique' not in st.session_state:
@@ -218,18 +328,13 @@ with st.sidebar:
                                   help="Reduce repetition of tokens")
     
     st.markdown("### 🤖 AI Model")
-    model_map = {
-        "GPT-4o mini": "gpt-4o-mini",
-        "GPT-4o": "gpt-4o",
-        "GPT-3.5 Turbo": "gpt-3.5-turbo"
-    }
     selected_model = st.selectbox(
         "AI Model",
-        list(model_map.keys()),
+        list(MODEL_MAP.keys()),
         key="model_select",
         label_visibility="collapsed"
     )
-    model = model_map[selected_model]
+    model = MODEL_MAP[selected_model]
     
     # ===== SECURITY GUARD: Input validation indicator =====
     st.markdown("---")
@@ -256,26 +361,44 @@ with st.sidebar:
         elif not st.session_state.api_key_valid:
             st.error("❌ Invalid API key! Please check your key.")
         else:
-            st.session_state.interview_started = True
-            st.session_state.messages = []
-            
-            # Create initial system message
-            system_prompt = PROMPT_TECHNIQUES[selected_technique]['system_prompt']
-            
-            # Add interview context
-            context = f"\n\nInterview Context:\n- Type: {interview_type}\n- Difficulty: {difficulty}"
-            if topic:
-                context += f"\n- Topic: {topic}"
-            if job_desc_input:
-                context += f"\n- Job Description: {job_desc_input[:500]}"
-            
-            system_prompt += context
-            
-            st.session_state.messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "assistant", "content": f"Hello! I'll be conducting your {interview_type.lower()} interview at {difficulty.lower()} difficulty. Let's begin! What would you like to start with? Or I can ask you the first question."}
-            ]
-            st.rerun()
+            base_system = PROMPT_TECHNIQUES[selected_technique]["system_prompt"]
+            ok_sys, sys_result = validate_system_prompt(base_system)
+            if not ok_sys:
+                st.error(f"Security validation failed: {sys_result}")
+            else:
+                ok_topic, topic_clean = validate_optional_context(topic, 2000, "Topic")
+                ok_job, job_clean = validate_optional_context(job_desc_input, 8000, "Job description")
+                if not ok_topic:
+                    st.error(f"❌ Security check failed: {topic_clean}")
+                elif not ok_job:
+                    st.error(f"❌ Security check failed: {job_clean}")
+                else:
+                    context = f"\n\nInterview Context:\n- Type: {interview_type}\n- Difficulty: {difficulty}"
+                    if topic_clean:
+                        context += f"\n- Topic: {topic_clean}"
+                    if job_clean:
+                        context += f"\n- Job Description: {job_clean[:500]}"
+
+                    # Base template validated above; topic/job validated with jailbreak patterns only
+                    # (avoid re-scanning merged text — job posts may contain words like "illegal".)
+                    system_prompt = sys_result + context
+                    final_system = system_prompt
+                    if st.session_state.structured_output:
+                        final_system = _append_json_mode_instruction(final_system)
+
+                    st.session_state.interview_started = True
+                    st.session_state.messages = [
+                        {"role": "system", "content": final_system},
+                        {
+                            "role": "assistant",
+                            "content": (
+                                f"Hello! I'll be conducting your {interview_type.lower()} interview "
+                                f"at {difficulty.lower()} difficulty. Let's begin! What would you like "
+                                "to start with? Or I can ask you the first question."
+                            ),
+                        },
+                    ]
+                    st.rerun()
 
 # Main content area
 if st.session_state.interview_started:
@@ -283,53 +406,74 @@ if st.session_state.interview_started:
     
     # Display chat messages
     for message in st.session_state.messages:
-        if message["role"] != "system":
-            with st.chat_message(message["role"]):
-                st.markdown(message["content"])
+        if message["role"] == "system":
+            continue
+        with st.chat_message(message["role"]):
+            content = message["content"]
+            if message["role"] == "assistant" and st.session_state.structured_output:
+                stripped = (content or "").strip()
+                if stripped.startswith("{"):
+                    _render_assistant_content(content, True)
+                else:
+                    st.markdown(content)
+            else:
+                st.markdown(content)
     
     # Chat input
     if prompt := st.chat_input("Your answer..."):
-        # Add user message
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
-        
-        # Generate AI response
-        if st.session_state.client:
+        ok_in, validated = validate_input(prompt)
+        if not ok_in:
+            st.error(f"❌ Security check failed: {validated}")
+            st.stop()
+
+        st.session_state.messages.append({"role": "user", "content": validated})
+
+        if not st.session_state.client:
+            st.session_state.messages.pop()
+            st.error("OpenAI client not initialized. Please check your API key.")
+        else:
             try:
-                # Prepare messages for API
                 messages_for_api = [
                     {"role": m["role"], "content": m["content"]}
                     for m in st.session_state.messages
                 ]
-                
-                # Call OpenAI API
-                response = st.session_state.client.chat.completions.create(
-                    model=model,
-                    messages=messages_for_api,
-                    temperature=temperature,
-                    top_p=top_p,
-                    frequency_penalty=frequency_penalty,
-                    max_tokens=1000
-                )
-                
-                ai_response = response.choices[0].message.content
-                
-                # Track tokens and cost
+
+                use_json = st.session_state.structured_output
+                if use_json and messages_for_api and messages_for_api[0]["role"] == "system":
+                    content = messages_for_api[0]["content"]
+                    if "JSON output mode" not in content:
+                        messages_for_api = list(messages_for_api)
+                        messages_for_api[0] = {
+                            **messages_for_api[0],
+                            "content": _append_json_mode_instruction(content),
+                        }
+
+                api_kwargs = {
+                    "model": model,
+                    "messages": messages_for_api,
+                    "temperature": temperature,
+                    "top_p": top_p,
+                    "frequency_penalty": frequency_penalty,
+                    "max_tokens": 1500,
+                }
+                if use_json:
+                    api_kwargs["response_format"] = {"type": "json_object"}
+
+                response = st.session_state.client.chat.completions.create(**api_kwargs)
+
+                ai_response = response.choices[0].message.content or ""
+
                 tokens_used = response.usage.total_tokens
-                cost = (tokens_used / 1000000) * 2.5  # Approximate cost for GPT-4o mini
+                cost = _estimate_cost_usd(model, tokens_used)
                 st.session_state.total_tokens += tokens_used
                 st.session_state.total_cost += cost
-                
-                # Add AI response
+
                 st.session_state.messages.append({"role": "assistant", "content": ai_response})
-                with st.chat_message("assistant"):
-                    st.markdown(ai_response)
-                
+                st.rerun()
+
             except Exception as e:
+                st.session_state.messages.pop()
                 st.error(f"Error: {str(e)}")
-        else:
-            st.error("OpenAI client not initialized. Please check your API key.")
     
     # End interview button
     if st.button("End Interview"):
