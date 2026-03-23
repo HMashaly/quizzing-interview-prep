@@ -1,5 +1,4 @@
 import streamlit as st
-import os
 import json
 from openai import OpenAI
 
@@ -124,7 +123,7 @@ if 'total_tokens' not in st.session_state:
 if 'messages' not in st.session_state:
     st.session_state.messages = []
 if 'user_api_key' not in st.session_state:
-    st.session_state.user_api_key = os.getenv("OPENAI_API_KEY", "")
+    st.session_state.user_api_key = ""
 if 'api_key_valid' not in st.session_state:
     st.session_state.api_key_valid = False
 if 'client' not in st.session_state:
@@ -487,12 +486,12 @@ else:
     ### Welcome to your AI-powered interview preparation tool!
     
     **Features:**
-    - 🎯 Multiple prompting techniques (Zero-shot, Few-shot, Chain-of-Thought, etc.)
-    - 📊 Structured JSON output option
-    - 🎭 Different interview types (Technical, Behavioral, Mixed)
-    - 📈 Adjustable difficulty levels
-    - 💰 Real-time cost tracking
-    - 🔒 Security features (input validation, jailbreak detection)
+    - 🎯 Five prompting techniques (Zero-shot, Few-shot, Chain-of-Thought, Self-Consistency, Role-based)
+    - 📊 Optional structured JSON replies (sidebar checkbox)
+    - 🎭 Interview types: Technical, Behavioral, Mixed
+    - 📈 Difficulty: Easy, Medium, Hard
+    - 💰 Approximate running cost and token totals in the sidebar
+    - 🔒 Input validation, jailbreak-style checks, system-prompt template checks
     
     **To get started:**
     1. Enter your OpenAI API key in the sidebar
